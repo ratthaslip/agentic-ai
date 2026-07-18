@@ -1,0 +1,98 @@
+# ============================================================
+# docker-compose.yml — รันครบชุดในคำสั่งเดียว
+#   docker compose up -d          # เปิด postgres + auto seed + agent (idle)
+#   docker compose run --rm agent python lab1_llm.py   # รันแต่ละ Lab
+# ============================================================
+# หมายเหตุ: ภายใน network ของ compose ให้เชื่อม DB ที่ host = "postgres"
+#          (ชื่อ service) ไม่ใช่ localhost
+
+services:
+  # ---------- ฐานข้อมูล PostgreSQL + auto seed ----------
+  postgres:
+    image: postgres:16
+    container_name: cgd-postgres
+    environment:
+      POSTGRES_USER: cgd_admin
+      POSTGRES_PASSWORD: cgd_pass_2026
+      POSTGRES_DB: cgd_fiscal
+    ports:
+      - "5432:5432"          # เปิดออกมาให้เครื่อง host ต่อได้ด้วย (เช่น Power BI / psql)
+    volumes:
+      # seed.sql ถูกรันอัตโนมัติครั้งแรกที่สร้าง volume ใหม่ (initdb)
+      - ./seed.sql:/docker-entrypoint-initdb.d/01_seed.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cgd_admin -d cgd_fiscal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Agent runner (Lab 1-5) ----------
+  agent:
+    build: .
+    container_name: cgd-agent
+    depends_on:
+      postgres:
+        condition: service_healthy   # รอ DB พร้อมก่อน (แก้ปัญหา connection refused)
+    environment:
+      # LLM — อ่านจากไฟล์ .env (ดู env_file ด้านล่าง)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      OPENAI_API_VERSION: ${OPENAI_API_VERSION:-}
+      # PostgreSQL — host = "postgres" (ชื่อ service ใน compose network)
+      PG_ADMIN_DSN: postgresql://cgd_admin:cgd_pass_2026@postgres:5432/cgd_fiscal
+      PG_READONLY_DSN: postgresql://cgd_readonly:readonly_pass_2026@postgres:5432/cgd_fiscal
+    env_file:
+      - .env                 # โหลด OPENAI_API_KEY ฯลฯ จากไฟล์ .env (ถ้ามี)
+    volumes:
+      - .:/app               # mount โค้ดเข้ามา แก้ไฟล์แล้วรันใหม่ได้ทันที
+    stdin_open: true         # เปิด STDIN ให้ HITL (input y/n) ใน lab5 ทำงานได้
+    tty: true
+    command: ["sleep", "infinity"]   # idle ไว้ให้ exec/run รันแต่ละ Lab
+
+  # ---------- Airflow (Bonus) — รัน DAG cgd_reconciliation ----------
+  # ใช้โหมด standalone (เหมาะสำหรับห้องอบรม/POC) — คำสั่งเดียวเปิดครบ
+  #   webserver + scheduler + SQLite metadata + สร้าง admin user ให้อัตโนมัติ
+  #   UI: http://localhost:8080  (user/pass ดูจาก log ตอนเริ่ม หรือไฟล์ standalone_admin_password.txt)
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    container_name: cgd-airflow
+    depends_on:
+      postgres:
+        condition: service_healthy   # DAG ต้องต่อ DB ของ lab ได้
+    ports:
+      - "8080:8080"                  # Airflow web UI
+    environment:
+      # ติดตั้ง dependency ของ project เข้า Airflow (ให้ import langgraph/langchain ใน DAG ได้)
+      _PIP_ADDITIONAL_REQUIREMENTS: "langgraph==0.2.* langchain==0.3.* langchain-openai==0.2.* psycopg2-binary python-dotenv pandas"
+      # ให้ DAG import db_tools / lab5_audit ได้ (โค้ด project ถูก mount ไว้ที่ /opt/project)
+      PYTHONPATH: "/opt/project"
+      # LLM (อ่านจาก .env)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      # PostgreSQL ของ lab — host = "postgres" (ชื่อ service)
+      PG_ADMIN_DSN: postgresql://cgd_admin:cgd_pass_2026@postgres:5432/cgd_fiscal
+      PG_READONLY_DSN: postgresql://cgd_readonly:readonly_pass_2026@postgres:5432/cgd_fiscal
+      # ปิด example DAGs ของ Airflow ให้เห็นเฉพาะ DAG ของเรา
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # ช่องทางส่งรายงาน (task send_report): email | ticket | dry_run — ค่าอื่น ๆ อ่านจาก .env
+      REPORT_CHANNEL: ${REPORT_CHANNEL:-dry_run}
+      # ให้ audit_trail.log / anomaly_report.txt เขียนลง /opt/project (mount กลับมา host ดูได้)
+      AUDIT_LOG_DIR: /opt/project
+    # รันด้วย UID ของ host (ตั้ง AIRFLOW_UID ใน .env = ผลของ `id -u`)
+    # เพื่อให้ไฟล์ที่ Airflow เขียนลง volume มี permission ตรงกับ host (แก้ปัญหา Linux)
+    user: "${AIRFLOW_UID:-50000}:0"
+    env_file:
+      - .env
+    volumes:
+      - ./dags:/opt/airflow/dags          # DAG folder
+      - .:/opt/project                    # โค้ด lab (db_tools, lab5_audit ฯลฯ) สำหรับ import
+      - airflow_data:/opt/airflow/logs     # เก็บ logs ข้าม restart (ไม่ทับ dags mount)
+    command: ["standalone"]
+
+volumes:
+  pgdata:
+  airflow_data:

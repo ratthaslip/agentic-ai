@@ -1,0 +1,11 @@
+# ===== CGD Reconciliation & Audit Agent — dependencies =====
+# แนะนำ pin เวอร์ชันเพื่อความเสถียรในห้องอบรม (ตามหมายเหตุในคู่มือ Lab 0.2)
+langgraph==0.2.*
+langchain==0.3.*
+langchain-openai==0.2.*
+psycopg2-binary
+python-dotenv
+pandas
+
+# (ทางเลือก) หากใช้ SQLAlchemy engine เพื่อเลี่ยง UserWarning ของ pandas ใน production
+# sqlalchemy

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+audit_trail.log
+anomaly_report.txt
+.git/
+.DS_Store

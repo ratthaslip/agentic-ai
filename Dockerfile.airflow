@@ -1,0 +1,22 @@
+# ============================================================
+# Dockerfile.airflow — pre-built Airflow image (production)
+# pre-install dependency ของ project ไว้ใน image (ไม่ใช้ _PIP_ADDITIONAL_REQUIREMENTS
+# ที่ติดตั้งใหม่ทุกครั้งตอน container เริ่ม ซึ่งช้าและไม่เหมาะกับ production)
+# ============================================================
+FROM apache/airflow:2.9.3-python3.11
+
+# ระบุเวอร์ชัน Airflow เพื่อใช้ constraints file (กัน dependency conflict)
+ARG AIRFLOW_VERSION=2.9.3
+ARG PYTHON_VERSION=3.11
+
+# ติดตั้ง dependency ของ lab (ใช้ constraints ของ Airflow เพื่อความเสถียร)
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir \
+      -r /tmp/requirements.txt \
+      --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+# คัดลอกโค้ด lab (db_tools, lab5_audit ฯลฯ) เข้า image ที่ /opt/project
+# เพื่อให้ DAG import ได้โดยไม่ต้องพึ่ง bind-mount (production = โค้ดฝังใน image)
+COPY --chown=airflow:root db_tools.py lab1_llm.py lab3_agent.py lab4_agent.py lab5_audit.py /opt/project/
+
+ENV PYTHONPATH=/opt/project

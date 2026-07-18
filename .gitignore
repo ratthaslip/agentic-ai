@@ -1,0 +1,15 @@
+# ===== secrets =====
+.env
+
+# ===== python =====
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== lab outputs =====
+audit_trail.log
+anomaly_report.txt
+
+# ===== os =====
+.DS_Store

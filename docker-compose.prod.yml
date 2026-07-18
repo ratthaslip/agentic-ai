@@ -1,0 +1,154 @@
+# ============================================================
+# docker-compose.prod.yml — Production setup
+#   - LocalExecutor (รัน task ขนานได้ ไม่ใช้ SequentialExecutor แบบ standalone)
+#   - Postgres metadata แยกต่างหาก (airflow-db) ไม่ปนกับ DB ของ lab (postgres)
+#   - Pre-built Airflow image (Dockerfile.airflow) — ไม่ติดตั้ง dependency ตอน start
+#   - แยก service: airflow-init / airflow-webserver / airflow-scheduler
+#
+# วิธีรัน:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   UI: http://localhost:8080  (user/pass = AIRFLOW_ADMIN_USER / AIRFLOW_ADMIN_PASSWORD ใน .env)
+#
+# ต้องตั้งใน .env: AIRFLOW_FERNET_KEY, AIRFLOW_ADMIN_PASSWORD, AIRFLOW_UID
+# ============================================================
+
+# ---- anchor ค่าที่ใช้ร่วมกันของทุก service ที่เป็น Airflow ----
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  image: cgd-airflow:2.9.3          # ตั้งชื่อ image ที่ build เพื่อ reuse ทุก service
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # metadata DB = service airflow-db (แยกจาก DB ของ lab)
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflow_meta_2026}@airflow-db:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?ต้องตั้ง AIRFLOW_FERNET_KEY ใน .env}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    # ---- ค่าใช้งานของ DAG (ต่อ DB lab + LLM + ช่องทางส่งรายงาน) ----
+    PG_ADMIN_DSN: postgresql://cgd_admin:cgd_pass_2026@postgres:5432/cgd_fiscal
+    PG_READONLY_DSN: postgresql://cgd_readonly:readonly_pass_2026@postgres:5432/cgd_fiscal
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+    REPORT_CHANNEL: ${REPORT_CHANNEL:-dry_run}
+    AUDIT_LOG_DIR: /opt/project
+    PYTHONPATH: /opt/project
+  env_file:
+    - .env
+  user: "${AIRFLOW_UID:-50000}:0"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - airflow_logs:/opt/airflow/logs
+  depends_on: &airflow-common-depends
+    airflow-db:
+      condition: service_healthy
+
+services:
+  # ---------- DB ของ lab (เหมือนเดิม) ----------
+  postgres:
+    image: postgres:16
+    container_name: cgd-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cgd_admin
+      POSTGRES_PASSWORD: cgd_pass_2026
+      POSTGRES_DB: cgd_fiscal
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/01_seed.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cgd_admin -d cgd_fiscal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Agent runner (เหมือนเดิม) ----------
+  agent:
+    build: .
+    container_name: cgd-agent
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      PG_ADMIN_DSN: postgresql://cgd_admin:cgd_pass_2026@postgres:5432/cgd_fiscal
+      PG_READONLY_DSN: postgresql://cgd_readonly:readonly_pass_2026@postgres:5432/cgd_fiscal
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    stdin_open: true
+    tty: true
+    command: ["sleep", "infinity"]
+
+  # ---------- Postgres metadata ของ Airflow (แยกต่างหาก) ----------
+  airflow-db:
+    image: postgres:16
+    container_name: cgd-airflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_meta_2026}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------- init: db migrate + สร้าง admin user (รันครั้งเดียวแล้วจบ) ----------
+  airflow-init:
+    <<: *airflow-common
+    container_name: cgd-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-admin}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:?ต้องตั้ง AIRFLOW_ADMIN_PASSWORD ใน .env}" \
+          --firstname CGD --lastname Admin --role Admin \
+          --email "${AIRFLOW_ADMIN_EMAIL:-admin@cgd.local}" || true
+    restart: on-failure
+
+  # ---------- webserver (UI) ----------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: cgd-airflow-web
+    restart: unless-stopped
+    command: ["webserver"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ---------- scheduler (รัน DAG) ----------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: cgd-airflow-scheduler
+    restart: unless-stopped
+    command: ["scheduler"]
+    depends_on:
+      <<: *airflow-common-depends
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  airflow_db_data:
+  airflow_logs:
