@@ -1,5 +1,5 @@
 """Lab 3 : ReAct agent + SQL tool."""
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
 from lab1_llm import build_llm          # ใช้ LLM จาก Lab 1
@@ -23,8 +23,8 @@ Schema:
 def build_agent():
     llm = build_llm()
     tools = [run_sql_query]
-    # create_react_agent สร้าง graph ReAct ให้อัตโนมัติ (reason -> tool -> observe -> ...)
-    return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    # create_agent สร้าง graph ReAct ให้อัตโนมัติ (reason -> tool -> observe -> ...)
+    return create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":
