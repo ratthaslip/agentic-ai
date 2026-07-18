@@ -6,6 +6,7 @@ langchain-openai==0.2.*
 psycopg2-binary
 python-dotenv
 pandas
+sqlalchemy
 
 # (ทางเลือก) หากใช้ SQLAlchemy engine เพื่อเลี่ยง UserWarning ของ pandas ใน production
 # sqlalchemy
